@@ -1,0 +1,14 @@
+# Environments
+venv/
+__pycache__/
+.pytest_cache/
+
+# Security & Secrets
+.env
+
+# Database (Ignore local user data)
+*.db
+*.sqlite3
+
+# Machine Learning Weights (Too large for standard Git)
+backend/app/ml/weights/*.pth
