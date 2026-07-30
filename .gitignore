@@ -12,10 +12,3 @@ __pycache__/
 
 # Machine Learning Weights (Too large for standard Git)
 backend/app/ml/weights/*.pth
-
-# Frontend React/Vite ignores
-frontend/node_modules/
-frontend/dist/
-frontend/dist-ssr/
-frontend/*.local
-frontend/.env
