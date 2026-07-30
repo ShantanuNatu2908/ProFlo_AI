@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: proflo_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app/ml/weights:/app/app/ml/weights # Keeps your PyTorch models persistent
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: proflo_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

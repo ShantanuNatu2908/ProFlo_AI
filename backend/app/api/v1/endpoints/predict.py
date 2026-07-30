@@ -3,6 +3,7 @@ import torch
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Depends
 import numpy as np
+import pandas as pd
 
 # Import our ML tools and Auth dependency
 from app.ml.model import StockPredictorLSTM
@@ -36,6 +37,16 @@ def predict_stock_price(ticker: str, current_user: User = Depends(get_current_us
 
         data = hist['Close'].values
 
+        # --- NEW: Extract the last 30 days for the React Chart ---
+        chart_data_df = hist.tail(30)
+        historical_data = []
+        for index, row in chart_data_df.iterrows():
+            historical_data.append({
+                "date": index.strftime("%Y-%m-%d"), 
+                "price": float(row["Close"])
+            })
+        # ---------------------------------------------------------
+
         # 3. Preprocess the data using the exact same scaling logic as training
         scaled_data, scaler = scale_data(data)
         
@@ -61,7 +72,8 @@ def predict_stock_price(ticker: str, current_user: User = Depends(get_current_us
             "ticker": ticker.upper(),
             "latest_actual_close": round(float(data[-1]), 2),
             "predicted_next_close": round(float(predicted_price[0][0]), 2),
-            "trend": "BULLISH" if predicted_price[0][0] > data[-1] else "BEARISH"
+            "trend": "BULLISH" if predicted_price[0][0] > data[-1] else "BEARISH",
+            "historical_data": historical_data
         }
         
     except Exception as e:

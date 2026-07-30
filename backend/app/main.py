@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.db.session import engine, Base
 from app.api.v1.endpoints import auth
 from app.api.v1.endpoints import predict, stocks, auth
+from app.api.v1.endpoints import auth, predict, watchlist
 
 # Initialize Database Tables
 Base.metadata.create_all(bind=engine)
@@ -12,7 +13,7 @@ app = FastAPI(title="ProfLo AI - Market Predictor", version="1.0.0")
 # Enable CORS for React Frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to standard React dev server (e.g. http://localhost:3000) in production
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], # <-- Add your frontend URL here
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -21,7 +22,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(stocks.router, prefix="/api/v1")
 app.include_router(predict.router, prefix="/api/v1")
-
+app.include_router(watchlist.router, prefix="/api/v1")
 @app.get("/")
 def root():
     return {"status": "online", "system": "ProfLo AI Core API"}
