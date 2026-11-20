@@ -1,80 +1,88 @@
 import os
+import pickle
+import numpy as np
 import torch
 import yfinance as yf
-from fastapi import APIRouter, HTTPException, Depends
-import numpy as np
-import pandas as pd
+from fastapi import APIRouter, HTTPException
 
-# Import our ML tools and Auth dependency
-from app.ml.model import StockPredictorLSTM
-from app.ml.utils import scale_data
-from app.api.v1.endpoints.auth import get_current_user
-from app.db.models import User
+from app.ml.trainer import (
+    SEQ_LENGTH,
+    WEIGHTS_DIR,
+    StockLSTM,
+    extract_close_prices,
+    train_model_on_demand,
+)
 
-router = APIRouter(prefix="/predict", tags=["AI Predictions"])
+router = APIRouter(prefix="/predict", tags=["Predict"])
+
 
 @router.post("/{ticker}")
-def predict_stock_price(ticker: str, current_user: User = Depends(get_current_user)):
-    """
-    Generate a next-day stock price prediction using the trained PyTorch LSTM model.
-    """
-    weights_path = f"app/ml/weights/{ticker}_lstm.pth"
-    
-    # 1. Check if we have a trained model for this ticker
-    if not os.path.exists(weights_path):
+def run_prediction(ticker: str):
+    ticker = ticker.upper().strip()
+    model_path = os.path.join(WEIGHTS_DIR, f"{ticker}.pth")
+    scaler_path = os.path.join(WEIGHTS_DIR, f"{ticker}_scaler.pkl")
+
+    # 1. Auto-train if weights or scaler do not exist yet
+    if not os.path.exists(model_path) or not os.path.exists(scaler_path):
+        try:
+            train_model_on_demand(ticker)
+        except ValueError as ve:
+            raise HTTPException(status_code=404, detail=str(ve))
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Auto-training failed for {ticker}: {str(e)}",
+            )
+
+    # 2. Load model and scaler (retrain automatically if an older weight format clashes)
+    model = StockLSTM(input_size=1, hidden_size=50, num_layers=2, output_size=1)
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu"), weights_only=True))
+        with open(scaler_path, "rb") as f:
+            scaler = pickle.load(f)
+    except Exception:
+        train_model_on_demand(ticker)
+        model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu"), weights_only=True))
+        with open(scaler_path, "rb") as f:
+            scaler = pickle.load(f)
+
+    model.eval()
+
+    # 3. Fetch recent market data (6 months ensures >= 60 trading days)
+    df = yf.download(ticker, period="6mo", progress=False)
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"Could not fetch recent data for {ticker}.")
+
+    close_series = extract_close_prices(df)
+    if len(close_series) < SEQ_LENGTH:
         raise HTTPException(
-            status_code=404, 
-            detail=f"No trained AI model found for {ticker}. Please run the training pipeline first."
+            status_code=400,
+            detail=f"Not enough recent trading days for {ticker} to run a {SEQ_LENGTH}-day prediction.",
         )
 
-    try:
-        # 2. Fetch the most recent data (We fetch 1 year to properly fit the scaler)
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
-        
-        if len(hist) < 60:
-            raise HTTPException(status_code=400, detail="Not enough historical data to generate a sequence.")
+    # 4. Prepare the 3D tensor (1, 60, 1) and run inference
+    last_60_prices = close_series.values[-SEQ_LENGTH:].reshape(-1, 1).astype(np.float32)
+    scaled_input = scaler.transform(last_60_prices)
+    input_tensor = torch.tensor(scaled_input, dtype=torch.float32).unsqueeze(0)
 
-        data = hist['Close'].values
+    with torch.no_grad():
+        predicted_scaled = model(input_tensor).numpy()
 
-        # --- NEW: Extract the last 30 days for the React Chart ---
-        chart_data_df = hist.tail(30)
-        historical_data = []
-        for index, row in chart_data_df.iterrows():
-            historical_data.append({
-                "date": index.strftime("%Y-%m-%d"), 
-                "price": float(row["Close"])
-            })
-        # ---------------------------------------------------------
+    predicted_next_close = float(scaler.inverse_transform(predicted_scaled)[0][0])
+    last_actual_close = float(close_series.values[-1])
+    trend = "BULLISH" if predicted_next_close >= last_actual_close else "BEARISH"
 
-        # 3. Preprocess the data using the exact same scaling logic as training
-        scaled_data, scaler = scale_data(data)
-        
-        # Grab only the last 60 days to form our prediction sequence
-        last_60_days = scaled_data[-60:]
-        
-        # Shape the tensor to exactly what the LSTM expects: (batch_size=1, sequence_length=60, features=1)
-        X_test = torch.tensor(last_60_days, dtype=torch.float32).unsqueeze(0)
+    # 5. Format last 30 days for the Recharts line chart
+    last_30 = close_series.tail(30)
+    historical_data = [
+        {"date": idx.strftime("%Y-%m-%d"), "price": round(float(val), 2)}
+        for idx, val in last_30.items()
+    ]
 
-        # 4. Load the Model
-        model = StockPredictorLSTM(input_size=1, hidden_size=50, num_layers=2, output_size=1)
-        model.load_state_dict(torch.load(weights_path))
-        model.eval() # Set model to evaluation mode (turns off dropout layers)
-
-        # 5. Generate the Prediction
-        with torch.no_grad(): # Disable gradient tracking to save memory/compute
-            predicted_scaled_price = model(X_test)
-            
-        # 6. Inverse transform the prediction back to a real-world currency value
-        predicted_price = scaler.inverse_transform(predicted_scaled_price.numpy())
-
-        return {
-            "ticker": ticker.upper(),
-            "latest_actual_close": round(float(data[-1]), 2),
-            "predicted_next_close": round(float(predicted_price[0][0]), 2),
-            "trend": "BULLISH" if predicted_price[0][0] > data[-1] else "BEARISH",
-            "historical_data": historical_data
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction engine error: {str(e)}")
+    return {
+        "ticker": ticker,
+        "current_price": round(last_actual_close, 2),
+        "predicted_next_close": round(predicted_next_close, 2),
+        "trend": trend,
+        "historical_data": historical_data,
+    }
